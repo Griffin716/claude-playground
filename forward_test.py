@@ -38,13 +38,30 @@ TRADE_COLS = ["entry_ts", "exit_ts", "right", "strike", "expiry", "entry_spot", 
 class LiveFeed:
     def __init__(self):
         import requests
-        from thetadata import ThetaClient
         self.rq = requests
-        self.H = {"APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"], "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"]}
-        self.theta = ThetaClient(api_key=os.environ["THETADATA_API_KEY"], dataframe_type="pandas")
+        missing = [k for k in ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "THETADATA_API_KEY") if not os.environ.get(k, "").strip()]
+        if missing:
+            raise SystemExit(f"CONFIG ERROR: missing repository secret(s): {', '.join(missing)}")
+        self.H = {"APCA-API-KEY-ID": os.environ["APCA_API_KEY_ID"].strip(), "APCA-API-SECRET-KEY": os.environ["APCA_API_SECRET_KEY"].strip()}
+        # Alpaca: accept either paper or live keys
+        self.alpaca_base = None
+        for base in ("https://paper-api.alpaca.markets", "https://api.alpaca.markets"):
+            r = self.rq.get(f"{base}/v2/clock", headers=self.H, timeout=20)
+            if r.status_code == 200:
+                self.alpaca_base = base; break
+        if not self.alpaca_base:
+            raise SystemExit(f"ALPACA ERROR: keys rejected (HTTP {r.status_code}: {r.text[:120]}). "
+                             "Check APCA_API_KEY_ID / APCA_API_SECRET_KEY secrets (paper-trading keys are fine).")
+        print(f"alpaca ok ({'paper' if 'paper' in self.alpaca_base else 'live'} keys)")
+        try:
+            from thetadata import ThetaClient
+            self.theta = ThetaClient(api_key=os.environ["THETADATA_API_KEY"].strip(), dataframe_type="pandas")
+        except Exception as e:
+            raise SystemExit(f"THETADATA ERROR: could not log in with THETADATA_API_KEY: {e!r}")
+        print("theta data ok")
 
     def market_open_today(self) -> tuple[bool, dt.time | None]:
-        r = self.rq.get("https://paper-api.alpaca.markets/v2/clock", headers=self.H, timeout=20); r.raise_for_status()
+        r = self.rq.get(f"{self.alpaca_base}/v2/clock", headers=self.H, timeout=20); r.raise_for_status()
         j = r.json(); nxt_close = pd.Timestamp(j["next_close"]).tz_convert(ET)
         today = dt.datetime.now(ET).date()
         return (nxt_close.date() == today), nxt_close.time()
@@ -240,8 +257,16 @@ def main():
 
     feed = LiveFeed()
     is_open, _ = feed.market_open_today()
-    if not is_open:
-        print("market closed today; nothing to do"); return
+    now = dt.datetime.now(ET)
+    if not is_open or now.time() >= dt.time(15, 58):
+        # after-hours self-test so a manual run still proves the wiring works
+        try:
+            s = feed.bars(now); print(f"spy bars ok: last close {s.iloc[-1]:.2f} at {s.index[-1]}")
+            q = feed.quote(float(round(float(s.iloc[-1]))), now.date(), "P")
+            print(f"option quote ok: {q}" if q else "option quote: none returned (normal outside market hours)")
+        except Exception as e:
+            print(f"self-test warning: {e!r}")
+        print("market closed; nothing to do — credentials verified, next session runs automatically"); return
     st = load_state()
     stop_at = t_(a.until)
     print(f"forward test running until {a.until} ET")
