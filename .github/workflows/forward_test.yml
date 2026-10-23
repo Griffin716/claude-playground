@@ -1,0 +1,41 @@
+name: forward-test
+on:
+  schedule:
+    - cron: '28 13 * * 1-5'
+    - cron: '28 14 * * 1-5'
+    - cron: '25 16 * * 1-5'
+    - cron: '25 17 * * 1-5'
+  workflow_dispatch:
+concurrency:
+  group: forward-test
+  cancel-in-progress: false
+permissions:
+  contents: write
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -q "thetadata>=1.0.9" pandas numpy requests
+      - name: pick session window
+        id: w
+        run: |
+          H=$(TZ=America/New_York date +%H)
+          if [ "$H" -lt 12 ]; then echo "until=12:30" >> $GITHUB_OUTPUT; else echo "until=15:58" >> $GITHUB_OUTPUT; fi
+      - name: run
+        env:
+          THETADATA_API_KEY: ${{ secrets.THETADATA_API_KEY }}
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          GIT_COMMIT: "1"
+        run: |
+          git config user.name "forward-test-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git pull -q --rebase || true
+          python forward_test.py --until ${{ steps.w.outputs.until }}
+      - name: report
+        if: always()
+        run: python report.py || true
